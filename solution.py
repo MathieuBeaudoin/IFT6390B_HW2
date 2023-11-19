@@ -1,5 +1,6 @@
 import numpy as np
 import pandas as pd
+import matplotlib.pyplot as plt
 from sklearn.model_selection import train_test_split
 
 
@@ -11,39 +12,83 @@ class SVM:
         self.batch_size = batch_size
         self.verbose = verbose
 
-    def make_one_versus_all_labels(self, y, m):
+    def make_one_versus_all_labels(self, y, m, neg_label=-1.):
         """
-        y : numpy array of shape (n,)
+        y : numpy array of shape (n,) -> Values in N
         m : int (num_classes)
         returns : numpy array of shape (n, m)
         """
-        pass
+        n = y.shape[0]
+        I = neg_label * np.ones((n, m))
+        I[range(n), y] = 1.
+        return I
 
-    def compute_loss(self, x, y):
+    def compute_loss(self, x, y, w=None):
         """
         x : numpy array of shape (minibatch size, num_features)
         y : numpy array of shape (minibatch size, num_classes)
+            -> Values in {-1, +1}
         returns : float
         """
-        pass
+        scores = self.score(x, w=w)
+        elementwise_loss = np.maximum(0, 2 - scores * y) ** 2
+        return np.mean(elementwise_loss.sum(axis=1))
 
-    def compute_gradient(self, x, y):
+    def score(self, x, w=None):
+        if w is None:
+            w = self.w
+        return x.dot(w)
+
+    def compute_gradient(self, x, y, validate=False):
         """
         x : numpy array of shape (minibatch size, num_features)
         y : numpy array of shape (minibatch size, num_classes)
+            -> Values in {-1, +1}
         returns : numpy array of shape (num_features, num_classes)
         """
-        pass
+        n, m = y.shape
+        d = x.shape[1]
+        xi = self.score(x) * y
+        #if self.verbose: print(f"xi:\n{xi[:5]}")
+        row_effects = -2. * (xi <= 2) * y * (2 - xi)
+        #if self.verbose: print(f"row_effects:\n{row_effects[:5]}")
+        assert (dims := row_effects.shape) == (n, m), f"Shape: {dims}"
+        data_grad = 1. / n * x.T.dot(row_effects)
+        assert (dims := data_grad.shape) == (d, m), f"Shape: {dims}"
+        reg_term = self.C * self.w
+        if validate:
+            approx = self.approximate_gradient(x, y)
+            if not np.allclose(data_grad, approx, atol=1e-3):
+                max_error = np.absolute(data_grad - approx).max().max()
+                print("\n\n".join([
+                    "Error in gradient computation!",
+                    f"Analytical:\n{data_grad}",
+                    f"Approximated:\n{approx}",
+                    f"Max error: {max_error}"
+                ]))
+                raise ValueError("Mistake with gradient!")
+        return data_grad + reg_term
+    
+    def approximate_gradient(self, x, y, eps=1e-8):
+        d, m = self.w.shape
+        grad = np.zeros((d, m))
+        def temp_w(k, j, direction):
+            w = self.w.copy()
+            w[k, j] += direction * eps
+            return w
+        for k in range(d):
+            for j in range(m):
+                l1 = self.compute_loss(x, y, w=temp_w(k, j,  1.))
+                l0 = self.compute_loss(x, y, w=temp_w(k, j, -1.))
+                grad[k, j] = (l1 - l0) / (2 * eps)
+        return grad
 
     # Batcher function
     def minibatch(self, iterable1, iterable2, size=1):
         l = len(iterable1)
         n = size
-
         for ndx in range(0, l, n):
-
             index2 = min(ndx + n, l)
-
             yield iterable1[ndx: index2], iterable2[ndx: index2]
 
     def infer(self, x):
@@ -51,7 +96,9 @@ class SVM:
         x : numpy array of shape (num_examples_to_infer, num_features)
         returns : numpy array of shape (num_examples_to_infer, num_classes)
         """
-        pass
+        scores = self.score(x)
+        y_inferred = np.argmax(scores, axis=1)
+        return self.make_one_versus_all_labels(y_inferred, self.m)
 
     def compute_accuracy(self, y_inferred, y):
         """
@@ -59,14 +106,14 @@ class SVM:
         y : numpy array of shape (num_examples, num_classes)
         returns : float
         """
-        pass
+        return np.mean(np.all(y_inferred == y, axis=1))
 
     def fit(self, x_train, y_train, x_test, y_test):
         """
         x_train : numpy array of shape (number of training examples, num_features)
         y_train : numpy array of shape (number of training examples, num_classes)
-        x_test : numpy array of shape (number of training examples, nujm_features)
-        y_test : numpy array of shape (number of training examples, num_classes)
+        x_test : numpy array of shape (number of testing examples, num_features)
+        y_test : numpy array of shape (number of testing examples, num_classes)
         returns : float, float, float, float
         """
         self.num_features = x_train.shape[1]
@@ -83,7 +130,14 @@ class SVM:
         for iteration in range(self.niter):
             # Train one pass through the training set
             for x, y in self.minibatch(x_train, y_train, size=self.batch_size):
-                grad = self.compute_gradient(x, y)
+                try:
+                    grad = self.compute_gradient(x, y, validate=(iteration==0))
+                except RuntimeWarning as e:
+                    print("\n".join([
+                        f"RuntimeWarning at iteration {iteration}",
+                        f"Current weight matrix:\n{self.w}"
+                    ]))
+                    raise e
                 self.w -= self.eta * grad
 
             # Measure loss and accuracy on training set
@@ -97,8 +151,13 @@ class SVM:
             test_accuracy = self.compute_accuracy(y_inferred, y_test)
 
             if self.verbose:
-                print(f"Iteration {iteration} | Train loss {train_loss:.04f} | Train acc {train_accuracy:.04f} |"
-                      f" Test loss {test_loss:.04f} | Test acc {test_accuracy:.04f}")
+                print(" | ".join([
+                    f"Iteration {iteration}",
+                    f"Train loss {train_loss:.04f}",
+                    f"Train acc {train_accuracy:.04f}",
+                    f"Test loss {test_loss:.04f}",
+                    f"Test acc {test_accuracy:.04f}"
+                ]))
 
             # Record losses, accs
             train_losses.append(train_loss)
@@ -106,7 +165,43 @@ class SVM:
             test_losses.append(test_loss)
             test_accs.append(test_accuracy)
 
+        for value in ["train_losses", "train_accs", "test_losses", "test_accs"]:
+            self.__dict__[value] = eval(value)
+
         return train_losses, train_accs, test_losses, test_accs
+
+
+def plot_learning(C_vec: list,
+                  data: tuple,
+                  common_args: dict = {
+                      "niter": 200,
+                      "eta": 0.0001,
+                      "batch_size": 100,
+                      "verbose": False},
+                  verbose: bool = True):
+    models = {}
+    for C in C_vec:
+        if verbose:
+            print(f"Training model with C={C}")
+        model = SVM(**common_args, C=C)
+        model.fit(*data)
+        models[C] = model
+
+    axes = plt.subplots(ncols=4, figsize=(16, 4))[1]
+    for c, model in models.items():
+        to_plot = {
+            "Training loss": model.train_losses,
+            "Training accuracy": model.train_accs,
+            "Test loss": model.test_losses,
+            "Test accuracy": model.test_accs
+        }
+        for ax, (title, value) in zip(axes, to_plot.items()):
+            ax.plot(value, label=str(c))
+            ax.set_xlabel("Epoch")
+            ax.set_title(title)
+            ax.legend()
+    plt.tight_layout()
+    plt.show()
 
 
 # DO NOT MODIFY THIS FUNCTION
